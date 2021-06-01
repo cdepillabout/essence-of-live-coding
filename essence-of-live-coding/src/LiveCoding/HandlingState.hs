@@ -18,6 +18,9 @@ import Data.Foldable (traverse_)
 import Data.IntMap
 import qualified Data.IntMap as IntMap
 
+-- fused-effects
+import Control.Algebra
+
 -- essence-of-live-coding
 import LiveCoding.Cell
 import LiveCoding.Cell.Monad
@@ -33,6 +36,29 @@ data Handling h where
     -> Handling h
   Uninitialized :: Handling h
 
+data HandlingStateE m a where
+  Register :: m () -> HandlingStateE m Key
+  Reregister :: m () -> Key -> HandlingStateE m ()
+  UnregisterAll :: HandlingStateE m ()
+  DestroyUnregistered :: HandlingStateE m ()
+
+instance MFunctor HandlingStateE where
+  hoist morphism (Register action) = Register $ morphism action
+  hoist morphism (Reregister action key) = Reregister (morphism action) key
+  hoist morphism UnregisterAll = UnregisterAll
+  hoist morphism DestroyUnregistered = DestroyUnregistered
+
+instance Algebra HandlingStateE (HandlingStateT m) where
+  alg = _
+
+-- | In this monad, handles can be registered,
+--   and their destructors automatically executed.
+--   It is basically a monad in which handles are automatically garbage collected.
+type HandlingStateT m = StateT (HandlingState m) m
+
+hoistHandlingStateT :: (Monad m, Monad n) => (forall x . m x -> n x) -> HandlingStateT m a -> HandlingStateT n a
+hoistHandlingStateT morphism = mapInstr (hoist morphism) . hoistProgramT morphism
+
 type Destructors m = IntMap (Destructor m)
 
 -- | Hold a map of registered handle keys and destructors
@@ -41,11 +67,6 @@ data HandlingState m = HandlingState
   , destructors :: Destructors m
   }
   deriving Data
-
--- | In this monad, handles can be registered,
---   and their destructors automatically executed.
---   It is basically a monad in which handles are automatically garbage collected.
-type HandlingStateT m = StateT (HandlingState m) m
 
 initHandlingState :: HandlingState m
 initHandlingState = HandlingState
