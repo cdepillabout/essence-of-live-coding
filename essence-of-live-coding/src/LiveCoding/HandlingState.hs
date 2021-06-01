@@ -20,10 +20,13 @@ import Data.Data
 import Control.Monad.Trans.Class (MonadTrans(lift))
 import Control.Monad.Trans.State.Strict
 import Data.Foldable (traverse_)
+import Data.Functor (($>))
 
 -- containers
 import Data.IntMap
 import qualified Data.IntMap as IntMap
+import qualified Data.IntSet as IntSet
+import qualified Data.List as List
 
 -- mmorph
 import Control.Monad.Morph
