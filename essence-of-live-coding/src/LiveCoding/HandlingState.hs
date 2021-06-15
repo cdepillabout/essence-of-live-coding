@@ -3,6 +3,13 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
 
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module LiveCoding.HandlingState where
 
 -- base
@@ -17,6 +24,9 @@ import Data.Foldable (traverse_)
 -- containers
 import Data.IntMap
 import qualified Data.IntMap as IntMap
+
+-- mmorph
+import Control.Monad.Morph
 
 -- fused-effects
 import Control.Algebra
@@ -38,6 +48,7 @@ data Handling h where
 
 data HandlingStateE m a where
   Register :: m () -> HandlingStateE m Key
+  -- TODO maybe HandlingStateT m () -> HandlingStateE m Key?
   Reregister :: m () -> Key -> HandlingStateE m ()
   UnregisterAll :: HandlingStateE m ()
   DestroyUnregistered :: HandlingStateE m ()
@@ -48,16 +59,32 @@ instance MFunctor HandlingStateE where
   hoist morphism UnregisterAll = UnregisterAll
   hoist morphism DestroyUnregistered = DestroyUnregistered
 
-instance Algebra HandlingStateE (HandlingStateT m) where
-  alg = _
+instance Algebra sig m => Algebra (HandlingStateE :+: sig) (HandlingStateT m) where
+  alg handler (L (Register destructor)) ctx = do
+    HandlingState { .. } <- HandlingStateT get
+    let key = nHandles + 1
+    let thing = unHandlingStateT $ handler $ destructor <$ ctx
+    HandlingStateT $ put HandlingState
+      { nHandles = key
+      , destructors = insertDestructor _ key destructors
+      }
+      -- type Handler ctx m n = forall x . ctx (m x) -> n (ctx x)
+
+    return $ key <$ ctx
+  alg handler (L (Reregister action key)) ctx = HandlingStateT $ do
+    HandlingState { .. } <- get
+    put HandlingState { destructors = insertDestructor (_ action) key destructors, .. }
+    return ctx
+  alg handler (L UnregisterAll) ctx = ctx <$ unregisterAll
+  alg handler (L DestroyUnregistered) ctx = ctx <$ destroyUnregistered
+  alg handler (R sig) ctx = HandlingStateT $ alg (unHandlingStateT . handler) (R sig) ctx
 
 -- | In this monad, handles can be registered,
 --   and their destructors automatically executed.
 --   It is basically a monad in which handles are automatically garbage collected.
-type HandlingStateT m = StateT (HandlingState m) m
-
-hoistHandlingStateT :: (Monad m, Monad n) => (forall x . m x -> n x) -> HandlingStateT m a -> HandlingStateT n a
-hoistHandlingStateT morphism = mapInstr (hoist morphism) . hoistProgramT morphism
+newtype HandlingStateT m a = HandlingStateT
+  { unHandlingStateT :: StateT (HandlingState m) m a }
+  deriving (Functor, Applicative, Monad)
 
 type Destructors m = IntMap (Destructor m)
 
@@ -81,7 +108,7 @@ runHandlingStateT
   :: Monad m
   => HandlingStateT m a
   -> m a
-runHandlingStateT = flip evalStateT initHandlingState
+runHandlingStateT = flip evalStateT initHandlingState . unHandlingStateT
 
 {- | Apply this to your main live cell before passing it to the runtime.
 
@@ -100,7 +127,7 @@ runHandlingStateC
   => Cell (HandlingStateT m) a b
   -> Cell                 m  a b
 runHandlingStateC cell = flip runStateC_ initHandlingState
-  $ hoistCellOutput garbageCollected cell
+  $ hoistCellOutput (unHandlingStateT . garbageCollected) cell
 
 -- | Like 'runHandlingStateC', but for whole live programs.
 runHandlingState
@@ -108,7 +135,7 @@ runHandlingState
   => LiveProgram (HandlingStateT m)
   -> LiveProgram                 m
 runHandlingState LiveProgram { .. } = flip runStateL initHandlingState LiveProgram
-  { liveStep = garbageCollected . liveStep
+  { liveStep = unHandlingStateT . garbageCollected . liveStep
   , ..
   }
 
@@ -125,7 +152,7 @@ data Destructor m = Destructor
 
 
 register
-  :: Monad m
+  :: (Monad m, Algebra sig m)
   => m () -- ^ Destructor
   -> HandlingStateT m Key
 register destructor = do
