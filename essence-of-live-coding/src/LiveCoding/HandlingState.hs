@@ -58,7 +58,6 @@ data Handling h where
     -> Handling h
   Uninitialized :: Handling h
 
-{-
 data HandlingStateE m a where
   Register :: m () -> HandlingStateE m Key
   -- TODO maybe HandlingStateT m () -> HandlingStateE m Key?
@@ -69,36 +68,15 @@ data HandlingStateE m a where
 instance MFunctor HandlingStateE where
   hoist morphism (Register action) = Register $ morphism action
   hoist morphism (Reregister action key) = Reregister (morphism action) key
-  hoist morphism UnregisterAll = UnregisterAll
-  hoist morphism DestroyUnregistered = DestroyUnregistered
 
 instance Algebra sig m => Algebra (HandlingStateE :+: sig) (HandlingStateT m) where
   alg handler (L (Register destructor)) ctx = do
-    HandlingState { .. } <- HandlingStateT get
-    let key = nHandles + 1
-    let thing = unHandlingStateT $ handler $ destructor <$ ctx
-    HandlingStateT $ put HandlingState
-      { nHandles = key
-      , destructors = insertDestructor _ key destructors
-      }
-      -- type Handler ctx m n = forall x . ctx (m x) -> n (ctx x)
-
-    return $ key <$ ctx
+    registry <- HandlingStateT look
+    let destructor' = fmap (fst . fst) $ runWriterT $ flip runAccumT registry $ unHandlingStateT $ handler $ destructor <$ ctx
+    (<$ ctx) <$> register destructor'
   alg handler (L (Reregister action key)) ctx = HandlingStateT $ do
-    HandlingState { .. } <- get
-    put HandlingState { destructors = insertDestructor (_ action) key destructors, .. }
-    return ctx
-  alg handler (L UnregisterAll) ctx = ctx <$ unregisterAll
-  alg handler (L DestroyUnregistered) ctx = ctx <$ destroyUnregistered
+    _
   alg handler (R sig) ctx = HandlingStateT $ alg (unHandlingStateT . handler) (R sig) ctx
-
--- | In this monad, handles can be registered,
---   and their destructors automatically executed.
---   It is basically a monad in which handles are automatically garbage collected.
-newtype HandlingStateT m a = HandlingStateT
-  { unHandlingStateT :: StateT (HandlingState m) m a }
-  deriving (Functor, Applicative, Monad)
--}
 
 type Destructors m = IntMap (Destructor m)
 
